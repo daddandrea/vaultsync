@@ -1,5 +1,14 @@
 import argparse
 
+from .commands import (
+    cmd_init,
+    cmd_config,
+    cmd_recipient,
+    cmd_project,
+    cmd_env,
+    cmd_credential,
+)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -26,9 +35,7 @@ def main():
     )
     add_rec.add_argument("key")
 
-    rm_rec = rec_sub.add_parser(
-        name="rm", help="Remove a recipient by key or by index"
-    )
+    rm_rec = rec_sub.add_parser(name="rm", help="Remove a recipient by key or by index")
     rm_rec.add_argument("key")
 
     # -- Project
@@ -95,21 +102,19 @@ def main():
     )
     pull_cred.add_argument("--project", "-p", help="Project name")
 
-    list_cred = cred_sub.add_parser(
-        "list", help="List stored credentials in a project"
-    )
+    list_cred = cred_sub.add_parser("list", help="List stored credentials in a project")
     list_cred.add_argument("--project", "-p", help="Project name")
 
     # -- Parse and dispatch
     args = parser.parse_args()
 
     commands = {
-        # "init": cmd_init,
-        # "config": cmd_config,
-        # "recipient": cmd_recipient,
-        # "project": cmd_project,
-        # "env": cmd_env,
-        # "credential": cmd_credential,
+        "init": cmd_init,
+        "config": cmd_config,
+        "recipient": cmd_recipient,
+        "project": cmd_project,
+        "env": cmd_env,
+        "credential": cmd_credential,
     }
 
     commands[args.command](args)
