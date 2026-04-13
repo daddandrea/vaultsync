@@ -2,7 +2,7 @@
 name = "vaultsync"
 version = "1.0.0"
 description = "CLI secret manager via git + tailscale"
-requires-python = ">3.10"
+requires-python = ">=3.10"
 
 [project.scripts]
 vaultsync = "vaultsync:main"
