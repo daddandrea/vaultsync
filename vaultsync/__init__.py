@@ -26,7 +26,7 @@ def main():
         name="recipient", help="Manage age recipient (who can decrypt)"
     )
     rec_sub = rec_parser.add_subparsers(dest="recipient_cmd", metavar="subcommand")
-    rec_sub.required
+    rec_sub.required = True
 
     rec_sub.add_parser(name="list", help="List all recipient")
 
@@ -75,9 +75,9 @@ def main():
     list_env = env_sub.add_parser("list", help="List .env files in a project")
     list_env.add_argument("--project", "-p", help="Project name")
 
-    list_env = env_sub.add_parser("diff", help="Diff local .env against remote")
-    list_env.add_argument("--project", "-p", help="Project name")
-    list_env.add_argument("--env", "-e", default=".env")
+    diff_env = env_sub.add_parser("diff", help="Diff local .env against remote")
+    diff_env.add_argument("--project", "-p", help="Project name")
+    diff_env.add_argument("--env", "-e", default=".env")
 
     log_env = env_sub.add_parser("log", help="Show commit history for a project")
     log_env.add_argument("--project", "-p", help="Project name")
