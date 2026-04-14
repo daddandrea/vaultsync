@@ -17,6 +17,7 @@ from .core import (
     save_config,
     load_config,
     ensure_repo,
+    ensure_migrated,
     list_projects,
     ensure_project_dir,
     git,
@@ -25,7 +26,9 @@ from .core import (
     project_dir,
     resolve_pubkeys,
     encrypt_file,
-    decrypt_file
+    decrypt_file,
+    parse_git_remote_url,
+    parse_url_parts,
 )
 
 
@@ -64,7 +67,6 @@ def cmd_init(_args):
             )
 
             raw_pubkey = pub_line.replace("Public key:", "").strip()
-
             pub_path.write_text(f"{raw_pubkey}\n")
 
             success(f"age key generated at {key_path}")
@@ -73,7 +75,8 @@ def cmd_init(_args):
         else:
             warn(f"Key not found at '{key_path}'. Decryption will fail until a valid key is present.")
 
-    cfg["age_pubkeys"] = [pubkey_path]
+    cfg["own_pubkey"] = pubkey_path
+    cfg["projects"] = {}
     save_config(cfg)
 
     success(f"Config saved to {CONFIG_FILE}")
@@ -93,74 +96,145 @@ def cmd_config(_args):
     cfg = load_config()
 
     info(f"Config ({CONFIG_FILE}):")
-    for k, v in cfg.items():
-        if k == "age_pubkeys":
-            print(f"  {k}:")
-            for pk in v:
-                print(f"    - {pk}")
-        else:
-            print(f"  {k}: {v}")
+    print(f"  repo_url:   {cfg.get('repo_url', '(not set)')}")
+    print(f"  age_key:    {cfg.get('age_key', '(not set)')}")
+    print(f"  own_pubkey: {cfg.get('own_pubkey', '(not set)')}")
+
+    projects = cfg.get("projects", {})
+    if projects:
+        print(f"  projects:")
+        for proj, proj_cfg in projects.items():
+            n = len(proj_cfg.get("age_pubkeys", []))
+            print(f"    {proj}: {n} recipient{'s' if n != 1 else ''}")
+    else:
+        print("  projects: (none)")
+
+    if "age_pubkeys" in cfg:
+        print()
+        warn("Config uses old format. Run 'vaultsync migrate' to upgrade.")
     print()
+
+
+def cmd_migrate(_args):
+    cfg = load_config()
+
+    if "age_pubkeys" not in cfg:
+        info("Config is already in the new format. Nothing to migrate.")
+        return
+
+    global_pubkeys = cfg.pop("age_pubkeys")
+    own_pubkey = global_pubkeys[0] if global_pubkeys else None
+
+    if own_pubkey:
+        cfg["own_pubkey"] = own_pubkey
+
+    cfg.setdefault("projects", {})
+
+    projects = list_projects()
+    for proj in projects:
+        existing = cfg["projects"].get(proj, {}).get("age_pubkeys", [])
+        merged = existing[:]
+        for pk in global_pubkeys:
+            if pk not in merged:
+                merged.append(pk)
+        cfg["projects"][proj] = {"age_pubkeys": merged}
+
+    save_config(cfg)
+    success("Migration complete.")
+    info(f"own_pubkey: {own_pubkey}")
+    for proj in projects:
+        n = len(cfg["projects"][proj]["age_pubkeys"])
+        info(f"{proj}: {n} recipient{'s' if n != 1 else ''}")
 
 
 def cmd_recipient(args):
     {
         "list": _recipient_list,
-        "add": _recipient_add,
-        "rm": _recipient_remove,
+        "add":  _recipient_add,
+        "rm":   _recipient_remove,
     }[args.recipient_cmd](args)
 
-def _recipient_list(_args):
+
+def _recipient_list(args):
     cfg = load_config()
-    pubkeys = cfg.get("age_pubkeys", [])
+    ensure_migrated(cfg)
+    project = resolve_project(getattr(args, "project", None))
+
+    proj_cfg = cfg.get("projects", {}).get(project, {})
+    pubkeys = proj_cfg.get("age_pubkeys", [])
 
     if not pubkeys:
-        info("No recipients configured.")
+        info(f"No recipients for project '{project}'.")
         return
 
-    n_of_pubkeys = len(pubkeys)
-    info(f"{n_of_pubkeys} recipient{'s' if n_of_pubkeys > 1 else ''}:")
+    n = len(pubkeys)
+    info(f"[{project}] {n} recipient{'s' if n > 1 else ''}:")
 
     for i, pk in enumerate(pubkeys, 1):
         path = Path(pk).expanduser()
         label = path.read_text().strip() if path.exists() else pk
-
         print(f"  [{i}] {pk}")
-
         if path.exists():
             print(f"    -> {label}")
     print()
 
+
 def _recipient_add(args):
     cfg = load_config()
+    ensure_migrated(cfg)
     key = args.key.strip()
     path = Path(key).expanduser()
 
     if not path.exists() and not key.startswith("age1"):
         error(f"'{key}' is not a valid age1... key or existing .pub path.")
 
-    pubkeys = cfg.get("age_pubkeys", [])
+    project = resolve_project(getattr(args, "project", None))
+
+    proj_cfg = cfg.setdefault("projects", {}).setdefault(project, {"age_pubkeys": []})
+    pubkeys = proj_cfg.setdefault("age_pubkeys", [])
+
     if key in pubkeys:
-        info("Recipient already in config.")
+        info(f"Recipient already in project '{project}'.")
         return
 
     pubkeys.append(key)
-    cfg["age_pubkeys"] = pubkeys
-
     save_config(cfg)
-    success(f"Recipient added: {key}")
-    warn("Run 'vaultsync env push' to re-encrypt for all recipients.")
+    success(f"Recipient added to '{project}': {key}")
+    warn(f"Run 'vaultsync env push --project {project}' to re-encrypt for all recipients.")
+
 
 def _recipient_remove(args):
     cfg = load_config()
-    pubkeys = cfg.get("age_pubkeys", [])
+    ensure_migrated(cfg)
     target = args.key.strip()
 
-    removed = None
+    if getattr(args, "all_projects", False):
+        if target.isdigit():
+            error("Cannot use an index with --all-projects. Provide the full key.")
 
+        removed_from = []
+        for proj, proj_cfg in cfg.get("projects", {}).items():
+            pubkeys = proj_cfg.get("age_pubkeys", [])
+            if target in pubkeys:
+                pubkeys.remove(target)
+                proj_cfg["age_pubkeys"] = pubkeys
+                removed_from.append(proj)
+
+        if not removed_from:
+            error(f"Recipient '{target}' not found in any project.")
+
+        save_config(cfg)
+        success(f"Recipient removed from: {', '.join(removed_from)}")
+        warn("Re-encrypt all affected projects with 'vaultsync env push'.")
+        return
+
+    project = resolve_project(getattr(args, "project", None))
+    proj_cfg = cfg.get("projects", {}).get(project, {})
+    pubkeys = proj_cfg.get("age_pubkeys", [])
+
+    removed = None
     if target.isdigit():
         idx = int(target) - 1
-
         if 0 <= idx < len(pubkeys):
             removed = pubkeys.pop(idx)
         else:
@@ -169,14 +243,14 @@ def _recipient_remove(args):
         pubkeys.remove(target)
         removed = target
     else:
-        error(f"Recipient '{target}' not found.")
+        error(f"Recipient '{target}' not found in project '{project}'.")
 
-    cfg["age_pubkeys"] = pubkeys
-
+    proj_cfg["age_pubkeys"] = pubkeys
+    cfg["projects"][project] = proj_cfg
     save_config(cfg)
 
-    success(f"Recipient removed: {removed}")
-    warn("Run 'vaultsync env push' to re-encrypt without this recipient.")
+    success(f"Recipient removed from '{project}': {removed}")
+    warn(f"Run 'vaultsync env push --project {project}' to re-encrypt without this recipient.")
 
 
 def cmd_project(args):
@@ -187,6 +261,7 @@ def cmd_project(args):
         "current": _project_current,
     }[args.project_cmd](args)
 
+
 def _project_list(_args):
     projects = list_projects()
     if not projects:
@@ -195,18 +270,20 @@ def _project_list(_args):
 
     current = Path(PROJECT_LINK).read_text().strip() if Path(PROJECT_LINK).exists() else None
 
-    n_of_projects = len(projects)
-    info(f"{n_of_projects} project{'s' if n_of_projects > 1 else ''}:")
+    n = len(projects)
+    info(f"{n} project{'s' if n > 1 else ''}:")
 
     for p in projects:
         marker = " - current" if p == current else ""
         print(f"  {p}{marker}")
     print()
 
+
 def _project_create(args):
     check_dependencies()
 
     cfg = load_config()
+    ensure_migrated(cfg)
     ensure_repo(cfg)
 
     name = args.name.strip()
@@ -221,12 +298,22 @@ def _project_create(args):
         git("add", str(gitkeep.relative_to(WORK_DIR)))
         git_commit_push(f"create project {name}")
 
+    # Auto-add own public key as recipient for this project
+    own = cfg.get("own_pubkey")
+    if own:
+        proj_cfg = cfg.setdefault("projects", {}).setdefault(name, {"age_pubkeys": []})
+        pubkeys = proj_cfg.setdefault("age_pubkeys", [])
+        if own not in pubkeys:
+            pubkeys.append(own)
+            save_config(cfg)
+
     success(f"Project '{name}' created.")
     use = input(f"Set '{name}' as current project in this directory? [Y/n]: ").strip().lower()
 
     if use != "n":
         Path(PROJECT_LINK).write_text(name)
         success(f"Current project set to '{name}'.")
+
 
 def _project_use(args):
     projects = list_projects()
@@ -235,6 +322,7 @@ def _project_use(args):
 
     Path(PROJECT_LINK).write_text(args.name)
     success(f"Current project set to '{args.name}'.")
+
 
 def _project_current(_args):
     link = Path(PROJECT_LINK)
@@ -254,16 +342,19 @@ def cmd_env(args):
         "log":  _env_log,
     }[args.env_cmd](args)
 
+
 def _env_slug(env_path: str) -> str:
     """Turn '.env' or '.env.production' into a safe filename slug."""
-    name = Path(env_path).name          # e.g. .env.production
-    slug = name.lstrip(".")             # env.production
+    name = Path(env_path).name
+    slug = name.lstrip(".")
     return slug or "env"
+
 
 def _env_push(args):
     check_dependencies()
 
     cfg = load_config()
+    ensure_migrated(cfg)
     ensure_repo(cfg)
 
     project = resolve_project(args.project)
@@ -274,15 +365,13 @@ def _env_push(args):
         error(f"File not found: '{env_path}'")
 
     slug = _env_slug(args.env)
-
     enc_name = f"{slug}.age"
     enc_path = project_dir(project) / enc_name
 
-    recipients = resolve_pubkeys(cfg)
-
-    n_of_recipients = len(recipients)
-    info(f"Encrypting '{env_path}' for {n_of_recipients} recipient{'s' if n_of_recipients > 1 else ''}...")
-    encrypt_file(cfg, env_path, enc_path)
+    recipients = resolve_pubkeys(cfg, project)
+    n = len(recipients)
+    info(f"Encrypting '{env_path}' for {n} recipient{'s' if n > 1 else ''}...")
+    encrypt_file(cfg, env_path, enc_path, project)
 
     rel_path = str(enc_path.relative_to(WORK_DIR))
     git("add", rel_path)
@@ -291,6 +380,7 @@ def _env_push(args):
     pushed = git_commit_push(f"[{project}] update {enc_name} {ts}")
     if pushed:
         success(f"[{project}] '{args.env}' pushed as '{enc_name}'.")
+
 
 def _env_pull(args):
     check_dependencies()
@@ -310,10 +400,10 @@ def _env_pull(args):
         )
 
     content = decrypt_file(cfg, enc_path)
-
     dest = Path(args.env)
     dest.write_text(content)
     success(f"[{project}] '{slug}.age' pulled to '{dest}'.")
+
 
 def _env_list(args):
     check_dependencies()
@@ -332,8 +422,9 @@ def _env_list(args):
 
     print(f"\n[{project}] env files:\n")
     for f in envs:
-        print(f"  {f.stem}")   # e.g. "env", "env.production"
+        print(f"  {f.stem}")
     print()
+
 
 def _env_diff(args):
     check_dependencies()
@@ -370,6 +461,7 @@ def _env_diff(args):
     finally:
         os.unlink(tmp)
 
+
 def _env_log(args):
     check_dependencies()
 
@@ -379,7 +471,8 @@ def _env_log(args):
 
     git("pull", "--quiet")
     git(
-        "log", "--oneline", "--graph", "--decorate", "--", str(project_dir(project).relative_to(WORK_DIR))
+        "log", "--oneline", "--graph", "--decorate", "--",
+        str(project_dir(project).relative_to(WORK_DIR))
     )
 
 
@@ -390,52 +483,92 @@ def cmd_credential(args):
         "list": _credential_list,
     }[args.credential_cmd](args)
 
-def _credential_filename(host: str) -> str:
+
+def _credential_filename(host: str, path: str | None = None) -> str:
+    """
+    Generate an encrypted credential filename.
+    Host-only:   credential-github.com.age
+    Path-scoped: credential-github.com+user+repo.age
+    """
+    if path:
+        path_slug = path.replace("/", "+")
+        return f"credential-{host}+{path_slug}.age"
     return f"credential-{host}.age"
+
+
+def _credential_label(stem: str) -> str:
+    """Turn a credential file stem into a human-readable label."""
+    parts = stem.removeprefix("credential-").split("+")
+    host = parts[0]
+    path = "/".join(parts[1:]) if len(parts) > 1 else None
+    return f"{host}/{path}" if path else host
+
 
 def _credential_push(args):
     check_dependencies()
 
     cfg = load_config()
+    ensure_migrated(cfg)
     ensure_repo(cfg)
     project = resolve_project(args.project)
-
     ensure_project_dir(project)
 
-    host = args.host
+    # Resolve scope: explicit --url > auto-detect from .git > --host fallback
+    url = getattr(args, "url", None)
+    if url is None:
+        url = parse_git_remote_url()
 
-    info(f"Reading credential for '{host}' from git credential store...")
+    if url:
+        protocol, host, url_path = parse_url_parts(url)
+        scope_label = f"{host}/{url_path}"
+    else:
+        host = args.host
+        protocol = "https"
+        url_path = None
+        scope_label = host
+
+    info(f"Reading credential for '{scope_label}' from git credential store...")
+
+    input_text = f"protocol={protocol}\nhost={host}\n"
+    if url_path:
+        input_text += f"path={url_path}\n"
+    input_text += "\n"
+
     try:
         result = subprocess.run(
             ["git", "credential", "fill"],
-            input=f"protocol=https\nhost={host}\n\n",
+            input=input_text,
             capture_output=True,
             text=True,
             check=True,
         )
         cred_text = result.stdout.strip()
         if not cred_text:
-            error(f"No credential returned for '{host}'.")
+            error(f"No credential returned for '{scope_label}'.")
     except subprocess.CalledProcessError:
         error(
-            f"No credential found for '{host}'.\n"
+            f"No credential found for '{scope_label}'.\n"
             f"  Make sure you've authenticated with Git at least once."
+        )
+
+    if url_path:
+        subprocess.run(
+            ["git", "config", "--global", "credential.useHttpPath", "true"],
+            check=True,
         )
 
     with tempfile.NamedTemporaryFile("w", suffix=".cred", delete=False) as tf:
         tf.write(cred_text)
         tmp = tf.name
 
-    enc_name = _credential_filename(host)
+    enc_name = _credential_filename(host, url_path)
     enc_path = project_dir(project) / enc_name
 
     try:
-        recipients = resolve_pubkeys(cfg)
-
-        n_of_recipients = len(recipients)
-
-        info(f"Encrypting credential for {n_of_recipients} recipient{'s' if n_of_recipients > 1 else ''}...")
-        encrypt_file(cfg, Path(tmp), enc_path)
+        recipients = resolve_pubkeys(cfg, project)
+        n = len(recipients)
+        info(f"Encrypting credential for {n} recipient{'s' if n > 1 else ''}...")
+        encrypt_file(cfg, Path(tmp), enc_path, project)
     finally:
         os.unlink(tmp)
 
@@ -443,9 +576,10 @@ def _credential_push(args):
     git("add", rel)
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    pushed = git_commit_push(f"[{project}] update credential {host} {ts}")
+    pushed = git_commit_push(f"[{project}] update credential {scope_label} {ts}")
     if pushed:
-        success(f"[{project}] Credential for '{host}' pushed.")
+        success(f"[{project}] Credential for '{scope_label}' pushed.")
+
 
 def _credential_pull(args):
     check_dependencies()
@@ -466,17 +600,23 @@ def _credential_pull(args):
     else:
         print(f"\nCredentials in '{project}':\n")
         for i, f in enumerate(cred_files, 1):
-            host = f.stem.removeprefix("credential-")
-            print(f"  [{i}] {host}")
+            print(f"  [{i}] {_credential_label(f.stem)}")
 
         choice = input("\nSelect credential: ").strip()
         idx = int(choice) - 1 if choice.isdigit() else -1
         if not (0 <= idx < len(cred_files)):
             error("Invalid selection.")
-
         enc_path = cred_files[idx]
 
     cred_text = decrypt_file(cfg, enc_path)
+
+    has_path = "+" in enc_path.stem.removeprefix("credential-")
+    if has_path:
+        subprocess.run(
+            ["git", "config", "--global", "credential.useHttpPath", "true"],
+            check=True,
+        )
+        info("Set credential.useHttpPath=true so git uses repo-scoped credentials.")
 
     info("Loading credential into git credential store...")
     try:
@@ -486,19 +626,19 @@ def _credential_pull(args):
             text=True,
             check=True,
         )
-        host = enc_path.stem.removeprefix("credential-")
-        success(f"Credential for '{host}' loaded into git credential store.")
-
+        label = _credential_label(enc_path.stem)
+        success(f"Credential for '{label}' loaded into git credential store.")
     except subprocess.CalledProcessError:
         error("Failed to load credential into git credential store.")
+
 
 def _credential_list(args):
     check_dependencies()
 
     cfg = load_config()
     ensure_repo(cfg)
-
     project = resolve_project(args.project)
+
     git("pull", "--quiet")
 
     proj_dir = project_dir(project)
@@ -509,6 +649,5 @@ def _credential_list(args):
 
     print(f"\n[{project}] credentials:\n")
     for f in creds:
-        host = f.stem.removeprefix("credential-")
-        print(f"  {host}")
+        print(f"  {_credential_label(f.stem)}")
     print()

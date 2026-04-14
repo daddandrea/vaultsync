@@ -5,6 +5,7 @@ import subprocess
 import json
 from pathlib import Path
 from typing import NoReturn
+from urllib.parse import urlparse
 
 CONFIG_DIR = Path.home() / ".vaultsync"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -50,6 +51,7 @@ def check_dependencies():
             "  git: https://git-scm.com/downloads"
         )
 
+
 def run(cmd: list[str], cwd=None, capture=False) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
@@ -59,10 +61,8 @@ def run(cmd: list[str], cwd=None, capture=False) -> subprocess.CompletedProcess:
             capture_output=capture,
             text=True
         )
-
     except FileNotFoundError:
         error(f"Command not found: '{cmd[0]}'. Is it installed and on PATH?")
-
     except subprocess.CalledProcessError as e:
         if capture and e.stderr:
             print(e.stderr.strip(), file=sys.stderr)
@@ -79,27 +79,30 @@ def load_config() -> dict:
     except json.JSONDecodeError:
         error(f"Config file is corrupted: {CONFIG_FILE}")
 
+
 def save_config(cfg: dict):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
 
 
+def ensure_migrated(cfg: dict):
+    """Error if config is still in the old global-recipients format."""
+    if "age_pubkeys" in cfg:
+        error(
+            "Your config uses the old format.\n"
+            "  Run 'vaultsync migrate' to upgrade to per-project recipients."
+        )
+
+
 def list_projects() -> list[str]:
-    """
-    Return a sorted list of all project names in the work directory.
-
-    Scans WORK_DIR for subdirectories, excluding hidden ones (e.g. .git).
-    Returns an empty list if WORK_DIR does not exist yet.
-    """
-
     if not WORK_DIR.exists():
         return []
     return sorted(
-        dir.name for dir in WORK_DIR.iterdir()
-          if dir.is_dir() and not dir.name.startswith(".")
+        d.name for d in WORK_DIR.iterdir()
+        if d.is_dir() and not d.name.startswith(".")
     )
+
 
 def resolve_project(args_project: str | None) -> str:
     """
@@ -126,7 +129,6 @@ def resolve_project(args_project: str | None) -> str:
 
     if choice.isdigit():
         idx = int(choice) - 1
-
         if 0 <= idx < len(projects):
             return projects[idx]
         error("Invalid selection")
@@ -135,27 +137,27 @@ def resolve_project(args_project: str | None) -> str:
     else:
         error(f"Project '{choice}' not found.")
 
+
 def project_dir(project: str) -> Path:
     return WORK_DIR / project
 
+
 def ensure_project_dir(project: str) -> Path:
-    dir = project_dir(project)
-    dir.mkdir(parents=True, exist_ok=True)
-    return dir
+    proj_dir = project_dir(project)
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    return proj_dir
 
 
 def ensure_repo(cfg: dict):
     if not (WORK_DIR / ".git").exists():
         info("Cloning vaultsync repo for the first time...")
-
         WORK_DIR.parent.mkdir(parents=True, exist_ok=True)
+        run(["git", "clone", cfg["repo_url"], str(WORK_DIR)])
 
-        run(
-            ["git", "clone", cfg["repo_url"], str(WORK_DIR)]
-        )
 
 def git(*args, capture=False) -> subprocess.CompletedProcess:
     return run(["git", *args], cwd=WORK_DIR, capture=capture)
+
 
 def git_commit_push(message: str) -> bool:
     diff = subprocess.run(
@@ -171,11 +173,13 @@ def git_commit_push(message: str) -> bool:
     return True
 
 
-def resolve_pubkeys(cfg: dict) -> list[str]:
-    pubkeys = []
-    for entry in cfg.get("age_pubkeys", []):
-        path = Path(entry).expanduser()
+def resolve_pubkeys(cfg: dict, project: str) -> list[str]:
+    project_cfg = cfg.get("projects", {}).get(project, {})
+    entries = project_cfg.get("age_pubkeys", [])
 
+    pubkeys = []
+    for entry in entries:
+        path = Path(entry).expanduser()
         if path.exists():
             pubkeys.append(path.read_text().strip())
         elif entry.startswith("age1"):
@@ -185,25 +189,64 @@ def resolve_pubkeys(cfg: dict) -> list[str]:
 
     if not pubkeys:
         error(
-            "No valid recipient found.\n"
-            "  Run 'vaultsync recipient add <key>' to add one."
+            f"No recipients found for project '{project}'.\n"
+            f"  Run 'vaultsync recipient add <key> --project {project}' to add one."
         )
     return pubkeys
 
-def recipient_args(cfg: dict) -> list[str]:
+
+def recipient_args(cfg: dict, project: str) -> list[str]:
     args = []
-    for key in resolve_pubkeys(cfg):
+    for key in resolve_pubkeys(cfg, project):
         args += ["-r", key]
     return args
 
-def encrypt_file(cfg: dict, src: Path, dest: Path):
+
+def encrypt_file(cfg: dict, src: Path, dest: Path, project: str):
     run(
-        ["age", *recipient_args(cfg), "-o", str(dest), str(src)]
+        ["age", *recipient_args(cfg, project), "-o", str(dest), str(src)]
     )
+
 
 def decrypt_file(cfg: dict, src: Path) -> str:
     result = run(
-                 ["age", "-d", "-i", str(Path(cfg["age_key"]).expanduser()), str(src)],
-                 capture=True
-             )
+        ["age", "-d", "-i", str(Path(cfg["age_key"]).expanduser()), str(src)],
+        capture=True
+    )
     return result.stdout
+
+
+def parse_git_remote_url(cwd=None) -> str | None:
+    """Read the origin remote URL from the git repo in cwd (or current directory)."""
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=cwd or Path.cwd(),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip() or None
+    except subprocess.CalledProcessError:
+        return None
+
+
+def parse_url_parts(url: str) -> tuple[str, str, str]:
+    """
+    Parse a git remote URL into (protocol, host, path).
+
+    Handles both HTTPS and SSH formats:
+      https://github.com/user/repo.git  ->  (https, github.com, user/repo)
+      git@github.com:user/repo.git      ->  (https, github.com, user/repo)
+    """
+    # SSH format: git@github.com:user/repo.git
+    if "@" in url and "://" not in url:
+        host_part, path_part = url.split(":", 1)
+        host = host_part.split("@", 1)[1]
+        path = path_part.removesuffix(".git")
+        return ("https", host, path)
+
+    # HTTPS format
+    parsed = urlparse(url)
+    path = parsed.path.lstrip("/").removesuffix(".git")
+    return (parsed.scheme or "https", parsed.netloc, path)

@@ -3,6 +3,7 @@ import argparse
 from .commands import (
     cmd_init,
     cmd_config,
+    cmd_migrate,
     cmd_recipient,
     cmd_project,
     cmd_env,
@@ -20,23 +21,31 @@ def main():
     # -- Top level
     sub.add_parser(name="init", help="Set up config, keys, and clone repo")
     sub.add_parser(name="config", help="Show current global config")
+    sub.add_parser(name="migrate", help="Migrate config to per-project recipients format")
 
     # -- Recipient
     rec_parser = sub.add_parser(
-        name="recipient", help="Manage age recipient (who can decrypt)"
+        name="recipient", help="Manage age recipients (who can decrypt)"
     )
     rec_sub = rec_parser.add_subparsers(dest="recipient_cmd", metavar="subcommand")
     rec_sub.required = True
 
-    rec_sub.add_parser(name="list", help="List all recipient")
+    list_rec = rec_sub.add_parser(name="list", help="List recipients for a project")
+    list_rec.add_argument("--project", "-p", help="Project name")
 
     add_rec = rec_sub.add_parser(
         name="add", help="Add a recipient (age1... key or .pub path)"
     )
     add_rec.add_argument("key")
+    add_rec.add_argument("--project", "-p", help="Project name")
 
     rm_rec = rec_sub.add_parser(name="rm", help="Remove a recipient by key or by index")
     rm_rec.add_argument("key")
+    rm_rec.add_argument("--project", "-p", help="Project name")
+    rm_rec.add_argument(
+        "--all-projects", action="store_true",
+        help="Remove this recipient from every project"
+    )
 
     # -- Project
     proj_parser = sub.add_parser(name="project", help="Manage projects")
@@ -94,7 +103,12 @@ def main():
     )
     push_cred.add_argument("--project", "-p", help="Project name")
     push_cred.add_argument(
-        "--host", "-H", default="github.com", help="Git host (default: github.com)"
+        "--url", "-u",
+        help="Full repo URL for repo-scoped credential (auto-detected if inside a git repo)"
+    )
+    push_cred.add_argument(
+        "--host", "-H", default="github.com",
+        help="Git host for host-scoped credential (default: github.com, used only if --url is not provided and not inside a git repo)"
     )
 
     pull_cred = cred_sub.add_parser(
@@ -109,11 +123,12 @@ def main():
     args = parser.parse_args()
 
     commands = {
-        "init": cmd_init,
-        "config": cmd_config,
-        "recipient": cmd_recipient,
-        "project": cmd_project,
-        "env": cmd_env,
+        "init":       cmd_init,
+        "config":     cmd_config,
+        "migrate":    cmd_migrate,
+        "recipient":  cmd_recipient,
+        "project":    cmd_project,
+        "env":        cmd_env,
         "credential": cmd_credential,
     }
 
