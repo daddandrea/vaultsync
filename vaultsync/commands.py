@@ -27,8 +27,6 @@ from .core import (
     resolve_pubkeys,
     encrypt_file,
     decrypt_file,
-    parse_git_remote_url,
-    parse_url_parts,
 )
 
 
@@ -259,6 +257,7 @@ def cmd_project(args):
         "create":  _project_create,
         "use":     _project_use,
         "current": _project_current,
+        "rm":      _project_remove,
     }[args.project_cmd](args)
 
 
@@ -313,6 +312,40 @@ def _project_create(args):
     if use != "n":
         Path(PROJECT_LINK).write_text(name)
         success(f"Current project set to '{name}'.")
+
+
+def _project_remove(args):
+    check_dependencies()
+
+    cfg = load_config()
+    ensure_migrated(cfg)
+    ensure_repo(cfg)
+
+    name = args.name.strip()
+    projects = list_projects()
+    if name not in projects:
+        error(f"Project '{name}' does not exist.")
+
+    confirm = input(f"Delete project '{name}' and all its secrets? This cannot be undone. [y/N]: ").strip().lower()
+    if confirm != "y":
+        info("Aborted.")
+        return
+
+    proj_dir = project_dir(name)
+    git("rm", "-r", str(proj_dir.relative_to(WORK_DIR)))
+    git_commit_push(f"delete project {name}")
+
+    # Remove from config
+    cfg.get("projects", {}).pop(name, None)
+    save_config(cfg)
+
+    # Clear .vaultsync-project if it points to this project
+    link = Path(PROJECT_LINK)
+    if link.exists() and link.read_text().strip() == name:
+        link.unlink()
+        info("Cleared active project link in current directory.")
+
+    success(f"Project '{name}' deleted.")
 
 
 def _project_use(args):
@@ -415,7 +448,7 @@ def _env_list(args):
     git("pull", "--quiet")
 
     proj_dir = project_dir(project)
-    envs = sorted(f for f in proj_dir.iterdir() if f.suffix == ".age" and "credential" not in f.name)
+    envs = sorted(f for f in proj_dir.iterdir() if f.suffix == ".age")
     if not envs:
         print(f"No .env files in project '{project}'.")
         return
@@ -474,180 +507,3 @@ def _env_log(args):
         "log", "--oneline", "--graph", "--decorate", "--",
         str(project_dir(project).relative_to(WORK_DIR))
     )
-
-
-def cmd_credential(args):
-    {
-        "push": _credential_push,
-        "pull": _credential_pull,
-        "list": _credential_list,
-    }[args.credential_cmd](args)
-
-
-def _credential_filename(host: str, path: str | None = None) -> str:
-    """
-    Generate an encrypted credential filename.
-    Host-only:   credential-github.com.age
-    Path-scoped: credential-github.com+user+repo.age
-    """
-    if path:
-        path_slug = path.replace("/", "+")
-        return f"credential-{host}+{path_slug}.age"
-    return f"credential-{host}.age"
-
-
-def _credential_label(stem: str) -> str:
-    """Turn a credential file stem into a human-readable label."""
-    parts = stem.removeprefix("credential-").split("+")
-    host = parts[0]
-    path = "/".join(parts[1:]) if len(parts) > 1 else None
-    return f"{host}/{path}" if path else host
-
-
-def _credential_push(args):
-    check_dependencies()
-
-    cfg = load_config()
-    ensure_migrated(cfg)
-    ensure_repo(cfg)
-    project = resolve_project(args.project)
-    ensure_project_dir(project)
-
-    # Resolve scope: explicit --url > auto-detect from .git > --host fallback
-    url = getattr(args, "url", None)
-    if url is None:
-        url = parse_git_remote_url()
-
-    if url:
-        protocol, host, url_path = parse_url_parts(url)
-        scope_label = f"{host}/{url_path}"
-    else:
-        host = args.host
-        protocol = "https"
-        url_path = None
-        scope_label = host
-
-    info(f"Reading credential for '{scope_label}' from git credential store...")
-
-    input_text = f"protocol={protocol}\nhost={host}\n"
-    if url_path:
-        input_text += f"path={url_path}\n"
-    input_text += "\n"
-
-    try:
-        result = subprocess.run(
-            ["git", "credential", "fill"],
-            input=input_text,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        cred_text = result.stdout.strip()
-        if not cred_text:
-            error(f"No credential returned for '{scope_label}'.")
-    except subprocess.CalledProcessError:
-        error(
-            f"No credential found for '{scope_label}'.\n"
-            f"  Make sure you've authenticated with Git at least once."
-        )
-
-    if url_path:
-        subprocess.run(
-            ["git", "config", "--global", "credential.useHttpPath", "true"],
-            check=True,
-        )
-
-    with tempfile.NamedTemporaryFile("w", suffix=".cred", delete=False) as tf:
-        tf.write(cred_text)
-        tmp = tf.name
-
-    enc_name = _credential_filename(host, url_path)
-    enc_path = project_dir(project) / enc_name
-
-    try:
-        recipients = resolve_pubkeys(cfg, project)
-        n = len(recipients)
-        info(f"Encrypting credential for {n} recipient{'s' if n > 1 else ''}...")
-        encrypt_file(cfg, Path(tmp), enc_path, project)
-    finally:
-        os.unlink(tmp)
-
-    rel = str(enc_path.relative_to(WORK_DIR))
-    git("add", rel)
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    pushed = git_commit_push(f"[{project}] update credential {scope_label} {ts}")
-    if pushed:
-        success(f"[{project}] Credential for '{scope_label}' pushed.")
-
-
-def _credential_pull(args):
-    check_dependencies()
-
-    cfg = load_config()
-    ensure_repo(cfg)
-    project = resolve_project(args.project)
-
-    git("pull")
-
-    proj_dir = project_dir(project)
-    cred_files = sorted(f for f in proj_dir.iterdir() if f.name.startswith("credential-"))
-    if not cred_files:
-        error(f"No credentials found in project '{project}'.")
-
-    if len(cred_files) == 1:
-        enc_path = cred_files[0]
-    else:
-        print(f"\nCredentials in '{project}':\n")
-        for i, f in enumerate(cred_files, 1):
-            print(f"  [{i}] {_credential_label(f.stem)}")
-
-        choice = input("\nSelect credential: ").strip()
-        idx = int(choice) - 1 if choice.isdigit() else -1
-        if not (0 <= idx < len(cred_files)):
-            error("Invalid selection.")
-        enc_path = cred_files[idx]
-
-    cred_text = decrypt_file(cfg, enc_path)
-
-    has_path = "+" in enc_path.stem.removeprefix("credential-")
-    if has_path:
-        subprocess.run(
-            ["git", "config", "--global", "credential.useHttpPath", "true"],
-            check=True,
-        )
-        info("Set credential.useHttpPath=true so git uses repo-scoped credentials.")
-
-    info("Loading credential into git credential store...")
-    try:
-        subprocess.run(
-            ["git", "credential", "approve"],
-            input=cred_text + "\n",
-            text=True,
-            check=True,
-        )
-        label = _credential_label(enc_path.stem)
-        success(f"Credential for '{label}' loaded into git credential store.")
-    except subprocess.CalledProcessError:
-        error("Failed to load credential into git credential store.")
-
-
-def _credential_list(args):
-    check_dependencies()
-
-    cfg = load_config()
-    ensure_repo(cfg)
-    project = resolve_project(args.project)
-
-    git("pull", "--quiet")
-
-    proj_dir = project_dir(project)
-    creds = sorted(f for f in proj_dir.iterdir() if f.name.startswith("credential-"))
-    if not creds:
-        print(f"No credentials in project '{project}'.")
-        return
-
-    print(f"\n[{project}] credentials:\n")
-    for f in creds:
-        print(f"  {_credential_label(f.stem)}")
-    print()

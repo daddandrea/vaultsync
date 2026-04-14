@@ -5,7 +5,6 @@ import subprocess
 import json
 from pathlib import Path
 from typing import NoReturn
-from urllib.parse import urlparse
 
 CONFIG_DIR = Path.home() / ".vaultsync"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -216,37 +215,3 @@ def decrypt_file(cfg: dict, src: Path) -> str:
     return result.stdout
 
 
-def parse_git_remote_url(cwd=None) -> str | None:
-    """Read the origin remote URL from the git repo in cwd (or current directory)."""
-    try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=cwd or Path.cwd(),
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip() or None
-    except subprocess.CalledProcessError:
-        return None
-
-
-def parse_url_parts(url: str) -> tuple[str, str, str]:
-    """
-    Parse a git remote URL into (protocol, host, path).
-
-    Handles both HTTPS and SSH formats:
-      https://github.com/user/repo.git  ->  (https, github.com, user/repo)
-      git@github.com:user/repo.git      ->  (https, github.com, user/repo)
-    """
-    # SSH format: git@github.com:user/repo.git
-    if "@" in url and "://" not in url:
-        host_part, path_part = url.split(":", 1)
-        host = host_part.split("@", 1)[1]
-        path = path_part.removesuffix(".git")
-        return ("https", host, path)
-
-    # HTTPS format
-    parsed = urlparse(url)
-    path = parsed.path.lstrip("/").removesuffix(".git")
-    return (parsed.scheme or "https", parsed.netloc, path)

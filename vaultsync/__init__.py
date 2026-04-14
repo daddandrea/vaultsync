@@ -7,7 +7,6 @@ from .commands import (
     cmd_recipient,
     cmd_project,
     cmd_env,
-    cmd_credential,
 )
 
 
@@ -64,6 +63,9 @@ def main():
 
     proj_sub.add_parser(name="current", help="Show the current project")
 
+    rm_proj = proj_sub.add_parser(name="rm", help="Delete a project and all its secrets")
+    rm_proj.add_argument("name")
+
     # -- Env
     env_parser = sub.add_parser("env", help="Manage .env files")
     env_sub = env_parser.add_subparsers(dest="env_cmd", metavar="subcommand")
@@ -91,45 +93,16 @@ def main():
     log_env = env_sub.add_parser("log", help="Show commit history for a project")
     log_env.add_argument("--project", "-p", help="Project name")
 
-    # -- Credential
-    cred_parser = sub.add_parser(
-        "credential", help="Manage git credentials (HTTPS tokens)"
-    )
-    cred_sub = cred_parser.add_subparsers(dest="credential_cmd", metavar="subcommand")
-    cred_sub.required = True
-
-    push_cred = cred_sub.add_parser(
-        "push", help="Save current git credentials for a project"
-    )
-    push_cred.add_argument("--project", "-p", help="Project name")
-    push_cred.add_argument(
-        "--url", "-u",
-        help="Full repo URL for repo-scoped credential (auto-detected if inside a git repo)"
-    )
-    push_cred.add_argument(
-        "--host", "-H", default="github.com",
-        help="Git host for host-scoped credential (default: github.com, used only if --url is not provided and not inside a git repo)"
-    )
-
-    pull_cred = cred_sub.add_parser(
-        "pull", help="Restore git credentials to credential store"
-    )
-    pull_cred.add_argument("--project", "-p", help="Project name")
-
-    list_cred = cred_sub.add_parser("list", help="List stored credentials in a project")
-    list_cred.add_argument("--project", "-p", help="Project name")
-
     # -- Parse and dispatch
     args = parser.parse_args()
 
     commands = {
-        "init":       cmd_init,
-        "config":     cmd_config,
-        "migrate":    cmd_migrate,
-        "recipient":  cmd_recipient,
-        "project":    cmd_project,
-        "env":        cmd_env,
-        "credential": cmd_credential,
+        "init":      cmd_init,
+        "config":    cmd_config,
+        "migrate":   cmd_migrate,
+        "recipient": cmd_recipient,
+        "project":   cmd_project,
+        "env":       cmd_env,
     }
 
     commands[args.command](args)

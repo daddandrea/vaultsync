@@ -68,8 +68,6 @@ vaultsync project create myproject
 # 3. Push your .env
 vaultsync env push --project myproject
 
-# 4. Push git credentials for a host
-vaultsync credential push --project myproject --host github.com
 ```
 
 ### Adding a second device
@@ -87,7 +85,6 @@ vaultsync recipient add age1xxxx...
 
 # Re-encrypt and push so the new device can decrypt
 vaultsync env push --project myproject
-vaultsync credential push --project myproject --host github.com
 ```
 
 Back on the new device:
@@ -133,6 +130,7 @@ After adding or removing a recipient, re-run `env push` on all projects to re-en
 | `project create <name>` | Create a new project |
 | `project use <name>` | Set the active project for the current directory |
 | `project current` | Show the active project |
+| `project rm <name>` | Delete a project and all its secrets |
 
 Setting an active project with `project use` writes a `.vaultsync-project` file in the current directory, so you can omit `--project` from all subsequent commands.
 
@@ -147,16 +145,6 @@ Setting an active project with `project use` writes a `.vaultsync-project` file 
 | `env list [--project]` | List all `.env` files stored in a project |
 | `env diff [--project] [--env]` | Diff local `.env` against the remote version |
 | `env log [--project]` | Show git commit history for a project |
-
----
-
-### `vaultsync credential`
-
-| Command | Description |
-|---|---|
-| `credential push [--project] [--host]` | Encrypt and push credentials from the local git credential store (default host: `github.com`) |
-| `credential pull [--project]` | Decrypt and load credentials into the local git credential store |
-| `credential list [--project]` | List stored credentials in a project |
 
 ---
 
@@ -180,7 +168,6 @@ For every project, re-push every `.env` and credential so the new ciphertext no 
 
 ```bash
 vaultsync env push --project myproject
-vaultsync credential push --project myproject --host github.com
 ```
 
 Repeat for each project.
