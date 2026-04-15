@@ -383,6 +383,85 @@ def _env_slug(env_path: str) -> str:
     return slug or "env"
 
 
+def _slug_to_env(slug: str) -> str:
+    """Turn 'env' or 'env.production' back into '.env' or '.env.production'."""
+    return f".{slug}"
+
+
+def _resolve_env_push(env_arg: str | None) -> str:
+    """
+    Resolve which local .env file to push.
+    If --env was given, use it directly.
+    If only one .env* file exists in cwd, use it.
+    Otherwise prompt the user to pick one.
+    """
+    if env_arg is not None:
+        return env_arg
+
+    candidates = sorted(Path(".").glob(".env*"))
+    candidates = [f for f in candidates if f.is_file()]
+
+    if not candidates:
+        error("No .env files found in the current directory. Use --env to specify one.")
+
+    if len(candidates) == 1:
+        return str(candidates[0])
+
+    print("\nMultiple .env files found:")
+    for i, f in enumerate(candidates, 1):
+        print(f"  [{i}] {f}")
+    choice = input("\nSelect file (name or number): ").strip()
+
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(candidates):
+            return str(candidates[idx])
+        error("Invalid selection.")
+    elif Path(choice) in candidates or Path(f"./{choice}") in candidates:
+        return choice
+    else:
+        error(f"File '{choice}' not found.")
+
+
+def _resolve_env_vault(env_arg: str | None, project: str) -> str:
+    """
+    Resolve which vault .age slug to use for pull/diff.
+    If --env was given, use it.
+    If only one .age file exists in the project vault, use it.
+    Otherwise prompt the user to pick one.
+    Returns the local .env destination path (e.g. '.env' or '.env.production').
+    """
+    if env_arg is not None:
+        return env_arg
+
+    proj_dir = project_dir(project)
+    age_files = sorted(f for f in proj_dir.iterdir() if f.suffix == ".age")
+
+    if not age_files:
+        error(f"No .env files found in project '{project}'. Push one first.")
+
+    if len(age_files) == 1:
+        return _slug_to_env(age_files[0].stem)
+
+    print(f"\nMultiple env files in project '{project}':")
+    for i, f in enumerate(age_files, 1):
+        print(f"  [{i}] {_slug_to_env(f.stem)}")
+    choice = input("\nSelect file (name or number): ").strip()
+
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(age_files):
+            return _slug_to_env(age_files[idx].stem)
+        error("Invalid selection.")
+
+    # Accept either '.env.foo' or 'env.foo' or the slug directly
+    normalized = choice.lstrip(".")
+    for f in age_files:
+        if f.stem == normalized:
+            return _slug_to_env(f.stem)
+    error(f"File '{choice}' not found in project '{project}'.")
+
+
 def _env_push(args):
     check_dependencies()
 
@@ -393,11 +472,12 @@ def _env_push(args):
     project = resolve_project(args.project)
     ensure_project_dir(project)
 
-    env_path = Path(args.env)
+    env_file = _resolve_env_push(args.env)
+    env_path = Path(env_file)
     if not env_path.exists():
         error(f"File not found: '{env_path}'")
 
-    slug = _env_slug(args.env)
+    slug = _env_slug(env_file)
     enc_name = f"{slug}.age"
     enc_path = project_dir(project) / enc_name
 
@@ -412,7 +492,7 @@ def _env_push(args):
 
     pushed = git_commit_push(f"[{project}] update {enc_name} {ts}")
     if pushed:
-        success(f"[{project}] '{args.env}' pushed as '{enc_name}'.")
+        success(f"[{project}] '{env_file}' pushed as '{enc_name}'.")
 
 
 def _env_pull(args):
@@ -424,16 +504,17 @@ def _env_pull(args):
 
     git("pull")
 
-    slug = _env_slug(args.env)
+    env_file = _resolve_env_vault(args.env, project)
+    slug = _env_slug(env_file)
     enc_path = project_dir(project) / f"{slug}.age"
     if not enc_path.exists():
         error(
             f"No '{slug}.age' found in project '{project}'.\n"
-            f"  Push it first with: vaultsync env push --project {project} --env {args.env}"
+            f"  Push it first with: vaultsync env push --project {project} --env {env_file}"
         )
 
     content = decrypt_file(cfg, enc_path)
-    dest = Path(args.env)
+    dest = Path(env_file)
     dest.write_text(content)
     success(f"[{project}] '{slug}.age' pulled to '{dest}'.")
 
@@ -468,14 +549,15 @@ def _env_diff(args):
 
     git("pull", "--quiet")
 
-    slug = _env_slug(args.env)
+    env_file = _resolve_env_vault(args.env, project)
+    slug = _env_slug(env_file)
     enc_path = project_dir(project) / f"{slug}.age"
     if not enc_path.exists():
         error(f"No '{slug}.age' found in project '{project}'.")
 
     remote = decrypt_file(cfg, enc_path)
 
-    local_p = Path(args.env)
+    local_p = Path(env_file)
     if not local_p.exists():
         error(f"No local file at '{local_p}'.")
 
