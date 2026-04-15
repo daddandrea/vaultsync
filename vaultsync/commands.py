@@ -504,9 +504,13 @@ def _env_pull(args):
 
     git("pull")
 
+    proj_dir = project_dir(project)
+    if not proj_dir.exists():
+        error(f"Project '{project}' does not exist. Run 'vaultsync project create {project}' first.")
+
     env_file = _resolve_env_vault(args.env, project)
     slug = _env_slug(env_file)
-    enc_path = project_dir(project) / f"{slug}.age"
+    enc_path = proj_dir / f"{slug}.age"
     if not enc_path.exists():
         error(
             f"No '{slug}.age' found in project '{project}'.\n"
