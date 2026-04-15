@@ -1,4 +1,5 @@
 import argparse
+from importlib.metadata import version
 
 from .commands import (
     cmd_init,
@@ -13,6 +14,9 @@ from .commands import (
 def main():
     parser = argparse.ArgumentParser(
         prog="vaultsync", description="CLI secrets manager via git + tailscale"
+    )
+    parser.add_argument(
+        "--version", "-v", action="version", version=f"vaultsync {version('vaultsync')}"
     )
     sub = parser.add_subparsers(dest="command", metavar="command")
     sub.required = True
