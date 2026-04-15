@@ -105,7 +105,10 @@ def main():
         "env":       cmd_env,
     }
 
-    commands[args.command](args)
+    try:
+        commands[args.command](args)
+    except KeyboardInterrupt:
+        print("\nAborted.")
 
 
 if __name__ == "__main__":
