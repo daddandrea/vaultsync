@@ -518,6 +518,13 @@ def _env_pull(args):
     dest.write_text(content)
     success(f"[{project}] '{slug}.age' pulled to '{dest}'.")
 
+    link = Path(PROJECT_LINK)
+    if not link.exists():
+        answer = input(f"Set '{project}' as current project in this directory? [Y/n]: ").strip().lower()
+        if answer != "n":
+            link.write_text(project)
+            success(f"Current project set to '{project}'.")
+
 
 def _env_list(args):
     check_dependencies()
