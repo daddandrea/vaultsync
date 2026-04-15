@@ -23,6 +23,7 @@ from .core import (
     git,
     git_commit_push,
     resolve_project,
+    require_project,
     project_dir,
     resolve_pubkeys,
     encrypt_file,
@@ -368,11 +369,12 @@ def _project_current(_args):
 
 def cmd_env(args):
     {
-        "push": _env_push,
-        "pull": _env_pull,
-        "list": _env_list,
-        "diff": _env_diff,
-        "log":  _env_log,
+        "push":   _env_push,
+        "pull":   _env_pull,
+        "list":   _env_list,
+        "diff":   _env_diff,
+        "log":    _env_log,
+        "status": _env_status,
     }[args.env_cmd](args)
 
 
@@ -469,7 +471,7 @@ def _env_push(args):
     ensure_migrated(cfg)
     ensure_repo(cfg)
 
-    project = resolve_project(args.project)
+    project = require_project()
     ensure_project_dir(project)
 
     env_file = _resolve_env_push(args.env)
@@ -500,7 +502,7 @@ def _env_pull(args):
 
     cfg = load_config()
     ensure_repo(cfg)
-    project = resolve_project(args.project)
+    project = require_project()
 
     git("pull")
 
@@ -514,7 +516,7 @@ def _env_pull(args):
     if not enc_path.exists():
         error(
             f"No '{slug}.age' found in project '{project}'.\n"
-            f"  Push it first with: vaultsync env push --project {project} --env {env_file}"
+            f"  Push it first with: vaultsync env push --env {env_file}"
         )
 
     content = decrypt_file(cfg, enc_path)
@@ -522,20 +524,13 @@ def _env_pull(args):
     dest.write_text(content)
     success(f"[{project}] '{slug}.age' pulled to '{dest}'.")
 
-    link = Path(PROJECT_LINK)
-    if not link.exists():
-        answer = input(f"Set '{project}' as current project in this directory? [Y/n]: ").strip().lower()
-        if answer != "n":
-            link.write_text(project)
-            success(f"Current project set to '{project}'.")
-
 
 def _env_list(args):
     check_dependencies()
 
     cfg = load_config()
     ensure_repo(cfg)
-    project = resolve_project(args.project)
+    project = require_project()
 
     git("pull", "--quiet")
 
@@ -556,7 +551,7 @@ def _env_diff(args):
 
     cfg = load_config()
     ensure_repo(cfg)
-    project = resolve_project(args.project)
+    project = require_project()
 
     git("pull", "--quiet")
 
@@ -593,10 +588,59 @@ def _env_log(args):
 
     cfg = load_config()
     ensure_repo(cfg)
-    project = resolve_project(args.project)
+    project = require_project()
 
     git("pull", "--quiet")
     git(
         "log", "--oneline", "--graph", "--decorate", "--",
         str(project_dir(project).relative_to(WORK_DIR))
     )
+
+
+def _env_status(args):
+    check_dependencies()
+
+    cfg = load_config()
+    ensure_repo(cfg)
+    project = require_project()
+
+    git("pull", "--quiet")
+
+    proj_dir = project_dir(project)
+    if not proj_dir.exists():
+        error(f"Project '{project}' does not exist.")
+
+    # Collect vault slugs
+    vault_slugs = {f.stem for f in proj_dir.iterdir() if f.suffix == ".age"}
+
+    # Collect local .env* files in cwd
+    local_files = {Path(f).name.lstrip("."): Path(f) for f in Path(".").glob(".env*") if Path(f).is_file()}
+    # normalize: '.env' -> 'env', '.env.production' -> 'env.production'
+    local_slugs = set(local_files.keys())
+
+    all_slugs = vault_slugs | local_slugs
+
+    if not all_slugs:
+        info(f"No .env files locally or in project '{project}'.")
+        return
+
+    print(f"\n[{project}] env status:\n")
+    for slug in sorted(all_slugs):
+        in_vault = slug in vault_slugs
+        local_path = Path(f".{slug}")
+        in_local = local_path.exists()
+
+        if in_vault and in_local:
+            remote = decrypt_file(cfg, proj_dir / f"{slug}.age")
+            local = local_path.read_text()
+            if local == remote:
+                status = "up to date"
+            else:
+                status = "modified"
+        elif in_vault and not in_local:
+            status = "remote only"
+        else:
+            status = "local only"
+
+        print(f"  .{slug:<25} {status}")
+    print()

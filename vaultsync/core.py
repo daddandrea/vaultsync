@@ -103,6 +103,17 @@ def list_projects() -> list[str]:
     )
 
 
+def require_project() -> str:
+    """Read project from .vaultsync-project in cwd; error if not found."""
+    link = Path(PROJECT_LINK)
+    if link.exists():
+        return link.read_text().strip()
+    error(
+        "No project set in this directory.\n"
+        "  Run 'vaultsync project use <name>' first."
+    )
+
+
 def resolve_project(args_project: str | None) -> str:
     """
     Resolve project name from:

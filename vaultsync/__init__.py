@@ -76,22 +76,19 @@ def main():
     env_sub.required = True
 
     push_env = env_sub.add_parser("push", help="Encrypt and push a .env file")
-    push_env.add_argument("--project", "-p", help="Project name")
     push_env.add_argument("--env", "-e", default=None, help="Path to .env file")
 
     pull_env = env_sub.add_parser("pull", help="Pull and decrypt a .env file")
-    pull_env.add_argument("--project", "-p", help="Project name")
     pull_env.add_argument("--env", "-e", default=None, help="Destination path")
 
-    list_env = env_sub.add_parser("list", help="List .env files in a project")
-    list_env.add_argument("--project", "-p", help="Project name")
+    env_sub.add_parser("list", help="List .env files in a project")
 
     diff_env = env_sub.add_parser("diff", help="Diff local .env against remote")
-    diff_env.add_argument("--project", "-p", help="Project name")
     diff_env.add_argument("--env", "-e", default=None, help="Path to .env file")
 
-    log_env = env_sub.add_parser("log", help="Show commit history for a project")
-    log_env.add_argument("--project", "-p", help="Project name")
+    env_sub.add_parser("log", help="Show commit history for a project")
+
+    env_sub.add_parser("status", help="Show sync status of .env files")
 
     # -- Parse and dispatch
     args = parser.parse_args()
